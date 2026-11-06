@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Events>
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System><Provider Name="Microsoft-Windows-Security-Auditing"/><EventID>4625</EventID><TimeCreated SystemTime="2026-10-26T09:14:01.000Z"/><EventRecordID>1001</EventRecordID><Channel>Security</Channel><Computer>WIN11-LAB</Computer></System>
+    <EventData><Data Name="TargetUserName">testuser</Data><Data Name="LogonType">2</Data><Data Name="IpAddress">192.0.2.10</Data></EventData>
+  </Event>
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System><Provider Name="Microsoft-Windows-Security-Auditing"/><EventID>4624</EventID><TimeCreated SystemTime="2026-10-26T09:14:18.000Z"/><EventRecordID>1002</EventRecordID><Channel>Security</Channel><Computer>WIN11-LAB</Computer></System>
+    <EventData><Data Name="TargetUserName">testuser</Data><Data Name="LogonType">2</Data></EventData>
+  </Event>
+</Events>

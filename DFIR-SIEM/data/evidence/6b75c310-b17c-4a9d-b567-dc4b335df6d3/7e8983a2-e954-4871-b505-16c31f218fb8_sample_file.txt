@@ -1,0 +1,4 @@
+
+EventID,TimeCreated,Computer,AccountName
+4625,2026-10-26T09:14:01,WIN11-LAB,testuser
+4624,2026-10-26T09:14:18,WIN11-LAB,testuser
