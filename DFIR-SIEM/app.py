@@ -95,10 +95,14 @@ def initialize_database():
                 FOREIGN KEY (case_id) REFERENCES cases(id)
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_account ON events(account)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_process ON events(process_name)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_account ON events(account)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_process ON events(process_name)")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS alerts (
@@ -119,9 +123,12 @@ def initialize_database():
                 FOREIGN KEY (case_id) REFERENCES cases(id)
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_case ON alerts(case_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alerts_case ON alerts(case_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)")
 
 
 initialize_database()
@@ -233,12 +240,14 @@ def ingest_evidence_file(evidence_row):
             # Stable per-evidence key prevents importing the same evidence twice.
             identity = "|".join([
                 evidence_row["id"],
-                str(event.get("event_record_id") or event.get("source_line") or ""),
+                str(event.get("event_record_id")
+                    or event.get("source_line") or ""),
                 str(event.get("event_id") or ""),
                 str(event.get("timestamp") or ""),
                 raw_event,
             ])
-            event_key = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()
+            event_key = hashlib.sha256(identity.encode(
+                "utf-8", errors="replace")).hexdigest()
             event_warnings = event.get("validation_warnings", [])
             warnings += bool(event_warnings)
             cursor = conn.execute("""
@@ -343,10 +352,28 @@ def save_uploaded_evidence(case_id, uploaded_file):
         destination.unlink(missing_ok=True)
         raise
 
+# --------------------------------------------------
+# ANALYSIS SESSION MANAGEMENT
+# --------------------------------------------------
+
+
+def clear_analysis_view():
+    """Clear displayed analysis results without deleting stored records."""
+    st.session_state["analysis_results_visible"] = False
+    st.session_state["analysis_evidence_ids"] = []
+    st.session_state["analysis_context"] = None
+    st.session_state["analysis_evidence_selection"] = []
+    st.session_state.pop("analysis_selected_event", None)
+
+
+def reset_analysis_on_case_change():
+    """Clear previous results when another case is selected."""
+    clear_analysis_view()
 
 # --------------------------------------------------
 # SIDEBAR
 # --------------------------------------------------
+
 
 st.sidebar.title("🛡️ Windows DFIR SIEM")
 st.sidebar.caption("Local investigation workspace")
@@ -361,6 +388,18 @@ page = st.sidebar.radio(
         "About",
     ],
 )
+# Clear analysis results when entering or leaving Event Analysis.
+if "_last_page" not in st.session_state:
+    st.session_state["_last_page"] = page
+
+elif st.session_state["_last_page"] != page:
+    if (
+        st.session_state["_last_page"] == "Event Analysis"
+        or page == "Event Analysis"
+    ):
+        clear_analysis_view()
+
+    st.session_state["_last_page"] = page
 
 st.sidebar.divider()
 st.sidebar.caption("Phase 3 — Detection & alerting")
@@ -564,10 +603,16 @@ elif page == "Evidence Inventory":
                         )
 
                 if saved_count:
-                    st.info(
+                    clear_analysis_view()
+
+                    st.success(
                         f"Successfully stored {saved_count} evidence file(s)."
                     )
 
+                    st.info(
+                        "New evidence stored successfully. "
+                        "Your historical records remain preserved in the database."
+                    )
     st.subheader("Registered Evidence")
     evidence_rows = get_evidence()
 
@@ -603,132 +648,326 @@ elif page == "Evidence Inventory":
 
 elif page == "Event Analysis":
     st.title("Event Analysis Workspace")
+
     st.write(
-        "Parse registered CSV, Windows Event XML and EVTX evidence into searchable "
-        "normalized events. Original evidence files remain unchanged."
+        "Analyse registered Windows event evidence. "
+        "Only results from the currently selected evidence "
+        "will be displayed."
     )
 
-    evidence_rows = get_evidence()
-    supported_rows = [
-        row for row in evidence_rows
-        if Path(row["original_name"]).suffix.lower() in {".csv", ".xml", ".evtx"}
-    ]
+    cases = get_cases()
 
-    st.subheader("Ingest registered evidence")
-    if not supported_rows:
-        st.info(
-            "No supported evidence files are registered yet. Open Evidence Inventory "
-            "and upload a .csv, .xml or .evtx file first."
-        )
+    if not cases:
+        st.info("Create an investigation case before analysing evidence.")
+
     else:
-        evidence_options = {
-            f'{row["original_name"]} — case {row["case_title"]} — {row["id"][:8]}': row
-            for row in supported_rows
+        # Select investigation case first.
+        case_options = {
+            f'{c["title"]} — {c["id"][:8]}': c["id"]
+            for c in cases
         }
-        selected_labels = st.multiselect(
-            "Choose evidence files to parse",
-            list(evidence_options.keys()),
+
+        selected_case_label = st.selectbox(
+            "Select investigation case",
+            list(case_options.keys()),
+            key="analysis_case_selector",
+            on_change=reset_analysis_on_case_change,
         )
-        if st.button("Parse selected evidence", type="primary", disabled=not selected_labels):
-            total_parsed = total_inserted = total_duplicates = total_warnings = 0
-            for label in selected_labels:
-                evidence_row = evidence_options[label]
-                try:
-                    parsed, inserted, duplicates, warnings = ingest_evidence_file(evidence_row)
-                    total_parsed += parsed
-                    total_inserted += inserted
-                    total_duplicates += duplicates
-                    total_warnings += warnings
-                    st.success(
-                        f'{evidence_row["original_name"]}: parsed {parsed}; '
-                        f'new events {inserted}; already imported {duplicates}; '
-                        f'events with validation warnings {warnings}.'
-                    )
-                except Exception as exc:
-                    st.error(f'{evidence_row["original_name"]}: ingestion failed: {exc}')
+
+        selected_case_id = case_options[selected_case_label]
+
+        # Retrieve only supported evidence belonging to this case.
+        evidence_rows = get_evidence(selected_case_id)
+
+        supported_rows = [
+            row for row in evidence_rows
+            if Path(row["original_name"]).suffix.lower()
+            in {".csv", ".xml", ".evtx"}
+        ]
+
+        st.divider()
+        st.subheader("Select evidence for analysis")
+
+        if not supported_rows:
+            clear_analysis_view()
+
             st.info(
-                f"Batch totals — parsed: {total_parsed}, stored new: {total_inserted}, "
-                f"duplicates skipped: {total_duplicates}, records with warnings: {total_warnings}."
+                "This case has no supported evidence files yet. "
+                "Upload a CSV, XML or EVTX file through Evidence Inventory."
             )
 
-    st.divider()
-    st.subheader("Search events")
-    all_events = get_events()
-    if not all_events:
-        st.info("No parsed events yet. Select evidence above and click Parse selected evidence.")
-    else:
-        filter_col1, filter_col2, filter_col3 = st.columns(3)
-        event_id_filter = filter_col1.text_input("Event ID (e.g. 4624, 4625, 1)")
-        account_filter = filter_col2.text_input("Account contains")
-        process_filter = filter_col3.text_input("Process contains")
-        filter_col4, filter_col5 = st.columns(2)
-        source_filter = filter_col4.text_input("Log source contains (e.g. Security, Sysmon)")
-        computer_filter = filter_col5.text_input("Computer contains")
-        timestamp_filter = st.text_input("Timestamp contains (UTC date/time, optional)")
+        else:
+            evidence_options = {
+                f'{row["original_name"]} — {row["id"][:8]}': row
+                for row in supported_rows
+            }
 
-        filtered_events = []
-        for event in all_events:
-            if event_id_filter.strip():
-                try:
-                    if event["event_id"] != int(event_id_filter.strip()):
-                        continue
-                except ValueError:
-                    st.error("Event ID filter must be an integer.")
+            selected_labels = st.multiselect(
+                "Choose evidence files",
+                list(evidence_options.keys()),
+                key="analysis_evidence_selection",
+                help="Only evidence selected here will be included in this analysis."
+            )
+
+            # Detect a change in the selected case or evidence.
+            current_context = (
+                selected_case_id,
+                tuple(sorted(
+                    evidence_options[label]["id"]
+                    for label in selected_labels
+                ))
+            )
+
+            if st.session_state.get("analysis_context") != current_context:
+                st.session_state["analysis_context"] = current_context
+                st.session_state["analysis_results_visible"] = False
+                st.session_state["analysis_evidence_ids"] = []
+
+            # Parse selected evidence.
+            if st.button(
+                "Analyse Selected Evidence",
+                type="primary",
+                disabled=not selected_labels,
+            ):
+                total_parsed = 0
+                total_inserted = 0
+                total_duplicates = 0
+                total_warnings = 0
+
+                successful_evidence_ids = []
+
+                with st.spinner("Parsing and analysing evidence..."):
+
+                    for label in selected_labels:
+                        evidence_row = evidence_options[label]
+
+                        try:
+                            parsed, inserted, duplicates, warnings = (
+                                ingest_evidence_file(evidence_row)
+                            )
+
+                            total_parsed += parsed
+                            total_inserted += inserted
+                            total_duplicates += duplicates
+                            total_warnings += warnings
+
+                            successful_evidence_ids.append(
+                                evidence_row["id"]
+                            )
+
+                            st.success(
+                                f'{evidence_row["original_name"]}: '
+                                f'{parsed} parsed, '
+                                f'{inserted} new events, '
+                                f'{duplicates} duplicates skipped, '
+                                f'{warnings} events with warnings.'
+                            )
+
+                        except Exception as exc:
+                            st.error(
+                                f'{evidence_row["original_name"]}: '
+                                f'Analysis failed: {exc}'
+                            )
+
+                # Show only results from successfully processed evidence.
+                st.session_state["analysis_evidence_ids"] = (
+                    successful_evidence_ids
+                )
+
+                st.session_state["analysis_results_visible"] = (
+                    bool(successful_evidence_ids)
+                )
+
+                st.info(
+                    f"Analysis summary — "
+                    f"Parsed: {total_parsed} | "
+                    f"New events: {total_inserted} | "
+                    f"Duplicates: {total_duplicates} | "
+                    f"Warnings: {total_warnings}"
+                )
+
+            st.divider()
+
+            # Results remain hidden until evidence is explicitly analysed.
+            if not st.session_state.get("analysis_results_visible", False):
+
+                st.info(
+                    "No analysis results are currently displayed. "
+                    "Select your evidence and click "
+                    "'Analyse Selected Evidence' to begin."
+                )
+
+            else:
+                st.subheader("Analysis Results")
+
+                selected_evidence_ids = set(
+                    st.session_state["analysis_evidence_ids"]
+                )
+
+                # Retrieve events belonging ONLY to the current evidence.
+                all_events = get_events(selected_case_id)
+
+                all_events = [
+                    event for event in all_events
+                    if event["evidence_id"] in selected_evidence_ids
+                ]
+
+                if not all_events:
+                    st.warning(
+                        "No events were extracted from the selected evidence."
+                    )
+
+                else:
+                    st.caption(
+                        f"Showing events from "
+                        f"{len(selected_evidence_ids)} selected evidence file(s)."
+                    )
+
+                    # Event filters.
+                    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+                    event_id_filter = filter_col1.text_input(
+                        "Event ID (e.g. 4624, 4625, 1)"
+                    )
+
+                    account_filter = filter_col2.text_input(
+                        "Account contains"
+                    )
+
+                    process_filter = filter_col3.text_input(
+                        "Process contains"
+                    )
+
+                    filter_col4, filter_col5 = st.columns(2)
+
+                    source_filter = filter_col4.text_input(
+                        "Log source contains"
+                    )
+
+                    computer_filter = filter_col5.text_input(
+                        "Computer contains"
+                    )
+
+                    timestamp_filter = st.text_input(
+                        "Timestamp contains (UTC date/time)"
+                    )
+
                     filtered_events = []
-                    break
-            if account_filter.lower() not in (event["account"] or "").lower():
-                continue
-            if process_filter.lower() not in (event["process_name"] or "").lower():
-                continue
-            if source_filter.lower() not in (event["log_source"] or "").lower():
-                continue
-            if computer_filter.lower() not in (event["computer"] or "").lower():
-                continue
-            if timestamp_filter.lower() not in (event["timestamp"] or "").lower():
-                continue
-            filtered_events.append(event)
 
-        st.caption(f"Showing {len(filtered_events)} of {len(all_events)} stored events")
-        display_rows = []
-        for event in filtered_events:
-            display_rows.append({
-                "Event ID": event["event_id"],
-                "Timestamp (UTC)": event["timestamp"],
-                "Computer": event["computer"],
-                "Account": event["account"],
-                "Log source": event["log_source"],
-                "Process": event["process_name"],
-                "Logon type": event["logon_type"],
-                "Source IP": event["source_ip"],
-                "File": event["evidence_name"],
-                "Warnings": event["validation_warnings"],
-            })
-        st.dataframe(display_rows, use_container_width=True, hide_index=True)
+                    for event in all_events:
 
-        if filtered_events:
-            selected_event_index = st.selectbox(
-                "Inspect event details",
-                range(len(filtered_events)),
-                format_func=lambda i: (
-                    f'ID {filtered_events[i]["event_id"]} | '
-                    f'{filtered_events[i]["timestamp"] or "No timestamp"} | '
-                    f'{filtered_events[i]["account"] or "Unknown account"} | '
-                    f'{filtered_events[i]["evidence_name"]}'
-                ),
-            )
-            selected_event = filtered_events[selected_event_index]
-            st.markdown("#### Event explanation")
-            st.write(explain_event(selected_event))
-            if selected_event["validation_warnings"] != "[]":
-                st.warning("Validation warnings: " + selected_event["validation_warnings"])
-            st.markdown("#### Original event data")
-            st.code(selected_event["raw_event"], language="json" if selected_event["source_format"] == "csv" else "xml")
+                        if event_id_filter.strip():
+                            try:
+                                if event["event_id"] != int(
+                                    event_id_filter.strip()
+                                ):
+                                    continue
 
-        st.caption(
-            "Explanations are preliminary triage guidance, not a malicious/benign verdict. "
-            "CSV exports may not contain the fields available in native Windows events."
-        )
+                            except ValueError:
+                                st.error(
+                                    "Event ID filter must be an integer."
+                                )
+                                filtered_events = []
+                                break
 
+                        if account_filter.lower() not in (
+                            event["account"] or ""
+                        ).lower():
+                            continue
+
+                        if process_filter.lower() not in (
+                            event["process_name"] or ""
+                        ).lower():
+                            continue
+
+                        if source_filter.lower() not in (
+                            event["log_source"] or ""
+                        ).lower():
+                            continue
+
+                        if computer_filter.lower() not in (
+                            event["computer"] or ""
+                        ).lower():
+                            continue
+
+                        if timestamp_filter.lower() not in (
+                            event["timestamp"] or ""
+                        ).lower():
+                            continue
+
+                        filtered_events.append(event)
+
+                    st.caption(
+                        f"Showing {len(filtered_events)} of "
+                        f"{len(all_events)} events"
+                    )
+
+                    display_rows = []
+
+                    for event in filtered_events:
+                        display_rows.append({
+                            "Event ID": event["event_id"],
+                            "Timestamp (UTC)": event["timestamp"],
+                            "Computer": event["computer"],
+                            "Account": event["account"],
+                            "Log source": event["log_source"],
+                            "Process": event["process_name"],
+                            "Logon type": event["logon_type"],
+                            "Source IP": event["source_ip"],
+                            "File": event["evidence_name"],
+                            "Warnings": event["validation_warnings"],
+                        })
+
+                    st.dataframe(
+                        display_rows,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    if filtered_events:
+
+                        selected_event_index = st.selectbox(
+                            "Inspect event details",
+                            range(len(filtered_events)),
+                            format_func=lambda i: (
+                                f'ID {filtered_events[i]["event_id"]} | '
+                                f'{filtered_events[i]["timestamp"] or "No timestamp"} | '
+                                f'{filtered_events[i]["account"] or "Unknown account"} | '
+                                f'{filtered_events[i]["evidence_name"]}'
+                            ),
+                            key="analysis_selected_event",
+                        )
+
+                        selected_event = filtered_events[
+                            selected_event_index
+                        ]
+
+                        st.markdown("#### Event explanation")
+
+                        st.write(explain_event(selected_event))
+
+                        if selected_event["validation_warnings"] != "[]":
+                            st.warning(
+                                "Validation warnings: "
+                                + selected_event["validation_warnings"]
+                            )
+
+                        st.markdown("#### Original event data")
+
+                        st.code(
+                            selected_event["raw_event"],
+                            language=(
+                                "json"
+                                if selected_event["source_format"] == "csv"
+                                else "xml"
+                            ),
+                        )
+
+                    st.caption(
+                        "Explanations are preliminary triage guidance, "
+                        "not a malicious/benign verdict. Always validate "
+                        "findings against the original event data."
+                    )
 
 # --------------------------------------------------
 # DETECTIONS & ALERTS
@@ -743,7 +982,8 @@ elif page == "Detections & Alerts":
 
     st.subheader("Enabled detection rules")
     st.dataframe([
-        {"Rule ID": r["rule_id"], "Rule": r["name"], "Severity": r["severity"], "Purpose": r["description"]}
+        {"Rule ID": r["rule_id"], "Rule": r["name"],
+            "Severity": r["severity"], "Purpose": r["description"]}
         for r in RULES
     ], use_container_width=True, hide_index=True)
 
@@ -751,57 +991,154 @@ elif page == "Detections & Alerts":
     if not cases:
         st.info("Create a case and ingest event evidence before running detections.")
     else:
-        case_options = {f'{c["title"]} — {c["id"][:8]}': c["id"] for c in cases}
-        selected_case_label = st.selectbox("Investigation case", list(case_options.keys()), key="detection_case")
+        case_options = {f'{c["title"]} — {c["id"][:8]}': c["id"]
+                        for c in cases}
+        selected_case_label = st.selectbox("Investigation case", list(
+            case_options.keys()), key="detection_case")
         selected_case_id = case_options[selected_case_label]
         case_events = get_events(selected_case_id)
         st.caption(f"Events available for detection: {len(case_events)}")
         if st.button("Run detection rules", type="primary", disabled=not case_events):
             with st.spinner("Evaluating events against detection rules..."):
-                created, existing = run_detections(selected_case_id, case_events, get_connection, utc_now)
-            st.success(f"Detection run complete. New alerts: {created}; existing alerts unchanged: {existing}.")
+                created, existing = run_detections(
+                    selected_case_id, case_events, get_connection, utc_now)
+            st.success(
+                f"Detection run complete. New alerts: {created}; existing alerts unchanged: {existing}.")
 
     st.divider()
     st.subheader("Alert queue")
+
     all_alerts = get_alerts()
-    if not all_alerts:
-        st.info("No alerts stored yet. Ingest events, then run detection rules above.")
+    cases = get_cases()
+
+    if not cases:
+        st.info("No investigation cases are available.")
+
     else:
-        col1, col2, col3 = st.columns(3)
-        severity_filter = col1.selectbox("Severity", ["All", "Critical", "High", "Medium", "Low", "Informational"], key="alert_severity")
-        status_filter = col2.selectbox("Status", ["All", "Open", "Investigating", "Resolved"], key="alert_status")
-        case_filter = col3.selectbox("Case", ["All"] + sorted({a["case_title"] for a in all_alerts}), key="alert_case")
-        visible = [a for a in all_alerts
-                   if (severity_filter == "All" or a["severity"] == severity_filter)
-                   and (status_filter == "All" or a["status"] == status_filter)
-                   and (case_filter == "All" or a["case_title"] == case_filter)]
-        st.dataframe([{
-            "ID": a["id"], "Severity": a["severity"], "Status": a["status"],
-            "Rule": a["rule_id"], "Alert": a["title"], "Case": a["case_title"],
-            "First seen (UTC)": a["first_seen"], "Last seen (UTC)": a["last_seen"],
-        } for a in visible], use_container_width=True, hide_index=True)
-        if visible:
-            selected_alert_id = st.selectbox(
-                "Inspect alert", [a["id"] for a in visible],
-                format_func=lambda alert_id: next(
-                    f'#{a["id"]} [{a["severity"]}] {a["title"]}' for a in visible if a["id"] == alert_id
-                ), key="selected_alert_id"
+        case_options = {
+            f'{c["title"]} — {c["id"][:8]}': c["id"]
+            for c in cases
+        }
+
+        selected_alert_case = st.selectbox(
+            "Select case to view alerts",
+            ["Select a case"] + list(case_options.keys()),
+            key="alert_queue_case",
+        )
+
+        if selected_alert_case == "Select a case":
+            st.info(
+                "Select an investigation case to view its alerts. "
+                "Alerts from other cases are hidden until you select them."
             )
-            selected_alert = next(a for a in visible if a["id"] == selected_alert_id)
-            st.markdown("#### Alert explanation")
-            st.write(selected_alert["description"])
-            st.write("**Supporting event IDs:** " + selected_alert["event_ids"])
-            st.write("**Evidence summary:**")
-            st.json(json.loads(selected_alert["evidence_summary"] or "{}"))
-            new_status = st.selectbox(
-                "Update status", ["Open", "Investigating", "Resolved"],
-                index=["Open", "Investigating", "Resolved"].index(selected_alert["status"]),
-                key=f'alert_status_{selected_alert_id}'
-            )
-            if st.button("Save alert status"):
-                update_alert_status(selected_alert_id, new_status)
-                st.success("Alert status updated.")
-                st.rerun()
+
+        else:
+            active_case_id = case_options[selected_alert_case]
+
+            case_alerts = [
+                a for a in all_alerts
+                if a["case_id"] == active_case_id
+            ]
+
+            if not case_alerts:
+                st.info(
+                    "No alerts have been generated for this case yet. "
+                    "Ingest evidence and run detection rules to generate alerts."
+                )
+
+            else:
+                col1, col2 = st.columns(2)
+
+                severity_filter = col1.selectbox(
+                    "Severity",
+                    ["All", "Critical", "High", "Medium", "Low", "Informational"],
+                    key="alert_severity",
+                )
+
+                status_filter = col2.selectbox(
+                    "Status",
+                    ["All", "Open", "Investigating", "Resolved"],
+                    key="alert_status",
+                )
+
+                visible = [
+                    a for a in case_alerts
+                    if (
+                        severity_filter == "All"
+                        or a["severity"] == severity_filter
+                    )
+                    and (
+                        status_filter == "All"
+                        or a["status"] == status_filter
+                    )
+                ]
+
+                st.dataframe(
+                    [{
+                        "ID": a["id"],
+                        "Severity": a["severity"],
+                        "Status": a["status"],
+                        "Rule": a["rule_id"],
+                        "Alert": a["title"],
+                        "Case": a["case_title"],
+                        "First seen (UTC)": a["first_seen"],
+                        "Last seen (UTC)": a["last_seen"],
+                    } for a in visible],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                if visible:
+                    selected_alert_id = st.selectbox(
+                        "Inspect alert",
+                        [a["id"] for a in visible],
+                        format_func=lambda alert_id: next(
+                            f'#{a["id"]} [{a["severity"]}] {a["title"]}'
+                            for a in visible
+                            if a["id"] == alert_id
+                        ),
+                        key="selected_alert_id",
+                    )
+
+                    selected_alert = next(
+                        a for a in visible
+                        if a["id"] == selected_alert_id
+                    )
+
+                    st.markdown("#### Alert explanation")
+                    st.write(selected_alert["description"])
+
+                    st.write(
+                        "**Supporting event IDs:** "
+                        + selected_alert["event_ids"]
+                    )
+
+                    st.write("**Evidence summary:**")
+                    st.json(
+                        json.loads(
+                            selected_alert["evidence_summary"] or "{}"
+                        )
+                    )
+
+                    new_status = st.selectbox(
+                        "Update status",
+                        ["Open", "Investigating", "Resolved"],
+                        index=[
+                            "Open",
+                            "Investigating",
+                            "Resolved",
+                        ].index(selected_alert["status"]),
+                        key=f'alert_status_{selected_alert_id}',
+                    )
+
+                    if st.button("Save alert status"):
+                        update_alert_status(
+                            selected_alert_id,
+                            new_status,
+                        )
+
+                        st.success("Alert status updated.")
+                        st.rerun()
 
     st.caption("Rules are heuristic and intentionally conservative. Validate every alert against raw event details and the investigation context.")
 
